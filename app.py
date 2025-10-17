@@ -5,8 +5,8 @@ import io
 import re
 
 # Fixed file paths
-SKU_FILE_PATH = "U:\\Automation Project\\SKU Simulation.xlsx"
-PLAN_FILE_PATH = "U:\\Automation Project\\ProductionPlan.xlsx"
+SKU_FILE_PATH = df = pd.read_excel("SKU Simulation.xlsx")
+PLAN_FILE_PATH = df = pd.read_excel("ProductionPlan.xlsx")
 
 # Helper function for maximum string cleanup
 def robust_string_clean(series):
