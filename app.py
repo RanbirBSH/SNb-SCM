@@ -275,26 +275,32 @@ def main():
         
         col1, col2 = st.columns([1, 3])
         with col1:
-            load_excel = st.button("📥 Load from Excel", type="secondary")
+            load_excel = st.button("📥 Load from Excel", type="secondary", key="load_excel_button")
         with col2:
             if not st.session_state.uploaded_plan_df.empty:
                 st.success(f"✅ Excel data loaded ({len(st.session_state.uploaded_plan_df)} rows)")
         
-        if load_excel or st.session_state.uploaded_plan_df.empty:
+        if load_excel:
             try:
+                # Clear cache to force reload of the Excel file
+                st.cache_data.clear()
+                
                 plan_hash = get_file_hash(PLAN_FILE_PATH)
                 processed = load_production_plan(plan_hash, date_strings)
                 
                 if processed is not None:
                     st.session_state.uploaded_plan_df = processed
+                    st.session_state.matrix_df = processed.copy()
                     st.success(f"✅ Plan loaded: {len(processed)} SKUs")
                     with st.expander("Preview"):
                         st.dataframe(processed.head(), use_container_width=True)
+                    st.rerun()
             except FileNotFoundError:
                 st.error(f"❌ File not found: {PLAN_FILE_PATH}")
             except Exception as e:
                 st.error(f"❌ Error: {e}")
         
+        # Set matrix_df if uploaded plan exists
         if not st.session_state.uploaded_plan_df.empty:
             st.session_state.matrix_df = st.session_state.uploaded_plan_df.copy()
 
@@ -502,8 +508,9 @@ def main():
     with c2:
         if st.button("🗑️ Clear Excel Plan", type="secondary"):
             st.session_state.uploaded_plan_df = pd.DataFrame()
-            if plan_mode == "Upload from Excel":
-                st.session_state.matrix_df = pd.DataFrame()
+            st.session_state.matrix_df = pd.DataFrame()
+            st.cache_data.clear()  # Clear cache when clearing Excel plan
+            st.success("Excel plan cleared.")
             st.rerun()
     
     with c3:
@@ -518,4 +525,5 @@ def main():
             st.rerun()
 
 if __name__ == "__main__":
+    main()
     main()
