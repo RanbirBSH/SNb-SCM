@@ -22,8 +22,18 @@ def get_file_hash(filepath):
     return None
 
 def clean_string(series):
-    """Clean string series"""
+    """Clean string series (used for SKU and text fields)"""
+    # Includes stripping non-breaking spaces (\xa0) and tabs (\t)
     return series.fillna("").astype(str).str.strip().str.replace('\xa0', '').str.replace('\t', '')
+
+def clean_numeric_column(series):
+    """
+    Clean numeric column to handle common formatting issues:
+    - Removes thousands separators (e.g., comma ',')
+    - Strips all whitespace
+    - Replaces non-breaking spaces
+    """
+    return series.astype(str).str.replace('\xa0', '').str.strip().str.replace('[,]', '', regex=True) # <-- NEW FUNCTION
 
 def find_column(df, variations):
     """Find column from variations list"""
@@ -95,6 +105,7 @@ def load_data(file_hash):
 def load_production_plan(file_hash, date_strings):
     """Load production plan from Excel"""
     try:
+        # Assuming PLAN_FILE_PATH is correct and points to the Excel file
         plan = pd.read_excel(PLAN_FILE_PATH, sheet_name="Sheet1")
         return process_plan(plan, date_strings)
     except Exception as e:
@@ -152,22 +163,19 @@ def process_plan(plan, date_strings):
         if col != "SKU":
             # Only attempt to convert date-formatted columns to numeric
             if re.match(r'\d{4}-\d{2}-\d{2}', str(col)):
+                # Apply the cleaning function before converting to numeric
+                plan[col] = clean_numeric_column(plan[col]) # <-- FIX LINE
                 plan[col] = pd.to_numeric(plan[col], errors="coerce").fillna(0)
             # Other non-date columns remain as is (they will be dropped later)
             
-    # --- FIX APPLIED HERE ---
-    
-    # 1. Ensure all date columns for the planning horizon exist, filling missing with 0.
+    # Ensure all date columns for the planning horizon exist, filling missing with 0.
     for d in date_strings:
         if d not in plan.columns:
             plan[d] = 0
 
-    # 2. Reindex the DataFrame to include only "SKU" and the full set of current date strings.
-    # This keeps the quantities for the dates in the planning horizon and drops any non-date columns or dates outside the horizon.
+    # Reindex the DataFrame to include only "SKU" and the full set of current date strings.
     plan = plan.reindex(columns=["SKU"] + date_strings, fill_value=0)
     
-    # --- END FIX ---
-
     plan = plan[plan["SKU"].str.strip() != ""]
         
     st.success(f"✅ Loaded: {len(plan)} rows, {len(plan.columns)} columns")
