@@ -6,47 +6,42 @@ import re
 import hashlib
 import os
 
-# Fixed file paths
-SKU_FILE_PATH = "SKU Simulation.xlsx"  
+# File paths
+SKU_FILE_PATH = "SKU Simulation.xlsx"
 PLAN_FILE_PATH = "ProductionPlan.xlsx"
 
-# Helper function to generate file hash for cache invalidation
+# Utility functions
 def get_file_hash(filepath):
     """Generate hash of file to detect changes"""
     try:
         if os.path.exists(filepath):
             with open(filepath, 'rb') as f:
                 return hashlib.md5(f.read()).hexdigest()
-        return None
     except Exception as e:
         st.warning(f"Could not generate hash for {filepath}: {e}")
-        return None
+    return None
 
-# Helper function for maximum string cleanup
-def robust_string_clean(series):
-    """Fills NaN, converts to string, strips visible space, and removes common hidden characters."""
-    return (
-        series.fillna("")
-        .astype(str)
-        .str.strip()
-        .str.replace('\xa0', '') # Remove non-breaking space
-        .str.replace('\t', '')   # Remove tab character
-    )
+def clean_string(series):
+    """Clean string series"""
+    return series.fillna("").astype(str).str.strip().str.replace('\xa0', '').str.replace('\t', '')
 
-@st.cache_data(ttl=600)  # 10 minute TTL as backup
+def find_column(df, variations):
+    """Find column from variations list"""
+    df_cols = {col.strip().upper().replace('_', ' '): col for col in df.columns}
+    for var in variations:
+        if var in df_cols:
+            return df_cols[var]
+    return None
+
+@st.cache_data(ttl=600)
 def load_data(file_hash):
-    """Loads SKU master data (SKU, Material, Quantity, Total Stock, Material Description, Supplier Name, MRP)."""
+    """Load SKU master data"""
     try:
         df = pd.read_excel(SKU_FILE_PATH, sheet_name="Sheet1")
+        st.info(f"📋 Columns found: {list(df.columns)}")
         
-        # Display actual columns found in the file for debugging
-        st.info(f"📋 Columns found in Excel file: {list(df.columns)}")
-        
-        # Robustly check for required columns with flexible matching
-        df_cols_upper = {col.strip().upper().replace('_', ' '): col for col in df.columns}
-        
-        # Define required columns and their possible variations
-        required_mappings = {
+        # Column mapping
+        required = {
             'SKU': ['SKU'],
             'MATERIAL': ['MATERIAL', 'MATERIAL NAME'],
             'QUANTITY': ['QUANTITY', 'QTY'],
@@ -56,744 +51,477 @@ def load_data(file_hash):
             'MRP': ['MRP']
         }
         
-        # Find matching columns
-        column_map = {}
-        missing_columns = []
+        col_map = {}
+        missing = []
         
-        for target_col, variations in required_mappings.items():
-            found = False
-            for variation in variations:
-                if variation in df_cols_upper:
-                    column_map[df_cols_upper[variation]] = target_col.replace(' ', '_').title().replace('_', ' ')
-                    found = True
-                    break
-            if not found:
-                missing_columns.append(target_col)
+        for target, variations in required.items():
+            found_col = find_column(df, variations)
+            if found_col:
+                col_map[found_col] = target.replace(' ', '_').title().replace('_', ' ')
+            else:
+                missing.append(target)
         
-        if missing_columns:
-            st.error(f"❌ Error: Could not find the following columns in the Excel file:")
-            for col in missing_columns:
-                possible_names = required_mappings[col]
-                st.error(f"   • **{col}** (looking for any of: {', '.join(possible_names)})")
-            st.error(f"")
-            st.error(f"📋 **Actual columns in your file:** {list(df.columns)}")
-            st.error(f"")
-            st.error(f"💡 **Please ensure your Excel file contains these columns** (column names are case-insensitive)")
+        if missing:
+            st.error(f"❌ Missing columns: {', '.join(missing)}")
+            st.error(f"📋 Available: {list(df.columns)}")
             st.stop()
         
-        # Rename columns to standardized names
-        df.rename(columns=column_map, inplace=True)
-            
-        # Apply robust cleaning to master SKU data
-        df["Sku"] = robust_string_clean(df["Sku"])
+        df.rename(columns=col_map, inplace=True)
+        
+        # Clean data
+        df["Sku"] = clean_string(df["Sku"])
         df["Material"] = df["Material"].astype(str).str.strip()
-        df["Quantity"] = pd.to_numeric(df["Quantity"], errors="coerce").fillna(0).astype(float)
-        df["Total Stock"] = pd.to_numeric(df["Total Stock"], errors="coerce").fillna(0).astype(float)
+        df["Quantity"] = pd.to_numeric(df["Quantity"], errors="coerce").fillna(0)
+        df["Total Stock"] = pd.to_numeric(df["Total Stock"], errors="coerce").fillna(0)
         
-        # Handle new columns with flexibility (they might not exist in older files)
-        if "Material Description" in df.columns:
-            df["Material Description"] = df["Material Description"].astype(str).str.strip()
-        else:
-            df["Material Description"] = ""
-            st.warning("⚠️ 'Material Description' column not found. Using empty values.")
+        # Optional columns
+        for col, warning in [("Material Description", "Material Description"), 
+                            ("Supplier Name", "Supplier Name"), 
+                            ("Mrp", "MRP")]:
+            if col in df.columns:
+                df[col] = df[col].fillna("").astype(str).str.strip().replace('nan', '')
+            else:
+                df[col] = ""
+                st.warning(f"⚠️ '{warning}' not found. Using empty values.")
         
-        if "Supplier Name" in df.columns:
-            df["Supplier Name"] = df["Supplier Name"].astype(str).str.strip()
-        else:
-            df["Supplier Name"] = ""
-            st.warning("⚠️ 'Supplier Name' column not found. Using empty values.")
-        
-        if "Mrp" in df.columns:
-            # Keep MRP as text/string, not numeric
-            df["Mrp"] = df["Mrp"].fillna("").astype(str).str.strip()
-            # Remove 'nan' strings that might appear from conversion
-            df["Mrp"] = df["Mrp"].replace('nan', '')
-        else:
-            df["Mrp"] = ""
-            st.warning("⚠️ 'MRP' column not found. Using empty values.")
-        
-        # Rename back to consistent internal names
-        df.rename(columns={
-            "Sku": "SKU",
-            "Mrp": "MRP"
-        }, inplace=True)
-        
+        df.rename(columns={"Sku": "SKU", "Mrp": "MRP"}, inplace=True)
         return df
+        
     except Exception as e:
         st.error(f"Error loading SKU data: {e}")
         st.stop()
 
-@st.cache_data(ttl=600)  # 10 minute TTL as backup
+@st.cache_data(ttl=600)
 def load_production_plan(file_hash, date_strings):
-    """Load production plan from Excel with cache invalidation"""
+    """Load production plan from Excel"""
     try:
-        uploaded_plan = pd.read_excel(PLAN_FILE_PATH, sheet_name="Sheet1")
-        processed_plan = process_uploaded_plan(uploaded_plan, date_strings)
-        return processed_plan
+        plan = pd.read_excel(PLAN_FILE_PATH, sheet_name="Sheet1")
+        return process_plan(plan, date_strings)
     except Exception as e:
-        st.error(f"Error loading production plan: {e}")
+        st.error(f"Error loading plan: {e}")
         return None
 
-def perform_mrp_run(production_plan_df, raw_materials_df, dates_list):
-    """Performs MRP run to calculate material consumption and remaining stock."""
-    material_list = raw_materials_df["Material"].unique().tolist()
-    # Use .first() instead of .sum() since Total Stock is the same for a material regardless of SKUs
-    material_stock = raw_materials_df.groupby("Material")["Total Stock"].first().to_dict()
+def process_plan(plan, date_strings):
+    """Process uploaded plan"""
+    st.info(f"🔍 Detected columns: {list(plan.columns)}")
     
-    # Create dictionaries for additional material information (keep MRP as string)
-    material_description_dict = raw_materials_df.groupby("Material")["Material Description"].first().to_dict()
-    supplier_name_dict = raw_materials_df.groupby("Material")["Supplier Name"].first().to_dict()
-    material_mrp_dict = raw_materials_df.groupby("Material")["MRP"].first().to_dict()
+    # Find SKU column
+    sku_col = None
+    for col in plan.columns:
+        col_clean = re.sub(r'[^\w\s-]', '', str(col)).replace('\xa0', ' ').strip().upper()
+        if any(kw in col_clean for kw in ['SKU', 'PRODUCTIONPLAN', 'PRODUCTION_PLAN', 'PRODUCTION PLAN']):
+            sku_col = col
+            break
     
-    mrp_df = pd.DataFrame(index=material_list, columns=dates_list).fillna(0).astype(float)
-    current_stock = {m: float(material_stock.get(m, 0.0)) for m in material_list}
-
-    for date_str in dates_list:
-        if date_str not in production_plan_df.columns:
+    if not sku_col:
+        st.error("❌ SKU column not found! Use: 'SKU', 'ProductionPlan', 'Production Plan'")
+        return None
+    
+    st.success(f"✅ Found SKU column: '{sku_col}'")
+    
+    # Map columns
+    col_map = {sku_col: "SKU"}
+    date_cols_found = []
+    
+    for col in plan.columns:
+        if col == sku_col:
             continue
-        date_production = production_plan_df[["SKU", date_str]].copy()
-        date_production.columns = ["SKU", "Planned Quantity"]
-        
-        # Ensure SKU column is clean for merging
-        date_production["SKU"] = date_production["SKU"].astype(str).str.strip()
-        
-        date_production["Planned Quantity"] = pd.to_numeric(date_production["Planned Quantity"], errors="coerce").fillna(0)
-        date_production = date_production[(date_production["SKU"] != "") & (date_production["Planned Quantity"] > 0)]
+        try:
+            if isinstance(col, (pd.Timestamp, date)):
+                date_str = pd.to_datetime(col).strftime("%Y-%m-%d")
+                col_map[col] = date_str
+                date_cols_found.append(date_str)
+            else:
+                parsed = pd.to_datetime(str(col), errors='coerce')
+                if pd.notna(parsed):
+                    date_str = parsed.strftime("%Y-%m-%d")
+                    col_map[col] = date_str
+                    date_cols_found.append(date_str)
+                else:
+                    col_map[col] = re.sub(r'[^\w\s-]', '', str(col)).strip()
+        except:
+            col_map[col] = re.sub(r'[^\w\s-]', '', str(col)).strip()
+    
+    st.info(f"📅 Date columns: {date_cols_found}")
+    
+    plan = plan.rename(columns=col_map)
+    plan["SKU"] = clean_string(plan["SKU"])
+    
+    # Convert to numeric
+    for col in plan.columns:
+        if col != "SKU":
+            plan[col] = pd.to_numeric(plan[col], errors="coerce").fillna(0)
+    
+    # Ensure all date columns exist
+    for d in date_strings:
+        if d not in plan.columns:
+            plan[d] = 0
+    
+    plan = plan[["SKU"] + date_strings]
+    plan = plan[plan["SKU"].str.strip() != ""]
+    
+    st.success(f"✅ Loaded: {len(plan)} rows, {len(plan.columns)} columns")
+    return plan
 
-        if date_production.empty:
-            for m in material_list:
-                mrp_df.loc[m, date_str] = current_stock.get(m, 0.0)
+def perform_mrp_run(plan_df, materials_df, dates):
+    """Perform MRP calculation"""
+    materials = materials_df["Material"].unique().tolist()
+    mat_stock = materials_df.groupby("Material")["Total Stock"].first().to_dict()
+    mat_desc = materials_df.groupby("Material")["Material Description"].first().to_dict()
+    mat_supplier = materials_df.groupby("Material")["Supplier Name"].first().to_dict()
+    mat_mrp = materials_df.groupby("Material")["MRP"].first().to_dict()
+    
+    mrp_df = pd.DataFrame(index=materials, columns=dates).fillna(0).astype(float)
+    current_stock = {m: float(mat_stock.get(m, 0)) for m in materials}
+
+    for date_str in dates:
+        if date_str not in plan_df.columns:
+            continue
+            
+        day_plan = plan_df[["SKU", date_str]].copy()
+        day_plan.columns = ["SKU", "Planned Quantity"]
+        day_plan["SKU"] = day_plan["SKU"].astype(str).str.strip()
+        day_plan["Planned Quantity"] = pd.to_numeric(day_plan["Planned Quantity"], errors="coerce").fillna(0)
+        day_plan = day_plan[(day_plan["SKU"] != "") & (day_plan["Planned Quantity"] > 0)]
+
+        if day_plan.empty:
+            for m in materials:
+                mrp_df.loc[m, date_str] = current_stock.get(m, 0)
             continue
 
-        consumption_df = pd.merge(date_production, raw_materials_df, on="SKU", how="inner")
-        if consumption_df.empty:
-            for m in material_list:
-                mrp_df.loc[m, date_str] = current_stock.get(m, 0.0)
+        consumption = pd.merge(day_plan, materials_df, on="SKU", how="inner")
+        if consumption.empty:
+            for m in materials:
+                mrp_df.loc[m, date_str] = current_stock.get(m, 0)
             continue
 
-        consumption_df["Consumption"] = consumption_df["Planned Quantity"] * consumption_df["Quantity"].astype(float)
-        daily_consumption = consumption_df.groupby("Material")["Consumption"].sum().to_dict()
+        consumption["Consumption"] = consumption["Planned Quantity"] * consumption["Quantity"]
+        daily_cons = consumption.groupby("Material")["Consumption"].sum().to_dict()
 
-        next_stock = current_stock.copy()
-        for m in material_list:
-            consumed = daily_consumption.get(m, 0.0)
-            prev = current_stock.get(m, 0.0)
-            remaining = prev - consumed
+        for m in materials:
+            remaining = current_stock.get(m, 0) - daily_cons.get(m, 0)
             mrp_df.loc[m, date_str] = remaining
-            next_stock[m] = remaining
-        current_stock = next_stock
+            current_stock[m] = remaining
 
-    # Add additional columns at the beginning (MRP is kept as string/text)
-    mrp_df.insert(0, "Total Stock", [float(material_stock.get(m, 0.0)) for m in mrp_df.index])
-    mrp_df.insert(0, "MRP", [str(material_mrp_dict.get(m, "")) for m in mrp_df.index])
-    mrp_df.insert(0, "Supplier Name", [str(supplier_name_dict.get(m, "")) for m in mrp_df.index])
-    mrp_df.insert(0, "Material Description", [str(material_description_dict.get(m, "")) for m in mrp_df.index])
+    # Add info columns
+    mrp_df.insert(0, "Total Stock", [float(mat_stock.get(m, 0)) for m in mrp_df.index])
+    mrp_df.insert(0, "MRP", [str(mat_mrp.get(m, "")) for m in mrp_df.index])
+    mrp_df.insert(0, "Supplier Name", [str(mat_supplier.get(m, "")) for m in mrp_df.index])
+    mrp_df.insert(0, "Material Description", [str(mat_desc.get(m, "")) for m in mrp_df.index])
     
     return mrp_df
 
-def find_sku_column(uploaded_plan):
-    """
-    Enhanced function to find the SKU/ProductionPlan column with better matching logic
-    """
-    # Create a mapping of original column names to cleaned versions for analysis
-    column_candidates = {}
-    
-    for col_original in uploaded_plan.columns:
-        col_str = str(col_original).strip()
-        
-        # Remove common problematic characters and normalize
-        col_clean = re.sub(r'[^\w\s-]', '', col_str)
-        col_clean = col_clean.replace('\xa0', ' ').strip()
-        col_clean_upper = col_clean.upper()
-        
-        # Check for SKU or ProductionPlan variations
-        if any(keyword in col_clean_upper for keyword in ['SKU', 'PRODUCTIONPLAN', 'PRODUCTION_PLAN', 'PRODUCTION PLAN']):
-            column_candidates[col_original] = col_clean
-    
-    # If we found candidates, return the first one (you can add more sophisticated logic here)
-    if column_candidates:
-        return list(column_candidates.keys())[0]
-    
-    # If no clear SKU column found, return None
-    return None
-
-def process_uploaded_plan(uploaded_plan, date_strings):
-    """
-    Process uploaded Excel plan with improved SKU column detection
-    """
-    # Debug: Show detected columns
-    detected_cols_display = [str(c).strip() for c in uploaded_plan.columns]
-    st.info(f"🔍 Detected columns: {detected_cols_display}")
-    
-    # Find the SKU column
-    sku_column = find_sku_column(uploaded_plan)
-    
-    if sku_column is None:
-        st.error("❌ **Could not find SKU column!** Please ensure your Excel file has a column with one of these names:")
-        st.error("- 'SKU'")
-        st.error("- 'ProductionPlan'") 
-        st.error("- 'Production Plan'")
-        st.error("- 'Production_Plan'")
-        return None
-    
-    st.success(f"✅ Found SKU column: '{sku_column}'")
-    
-    # Create column mapping
-    column_mapping = {}
-    date_columns_found = []
-    
-    # First, map the SKU column
-    column_mapping[sku_column] = "SKU"
-    
-    # Then map date columns
-    for col_original in uploaded_plan.columns:
-        if col_original == sku_column:
-            continue  # Already mapped
-            
-        col_str = str(col_original)
-        target_date = None
-        
-        # Try to parse as date
-        try:
-            # Handle different date formats
-            if isinstance(col_original, (pd.Timestamp, date)):
-                target_date = pd.to_datetime(col_original).strftime("%Y-%m-%d")
-                date_columns_found.append(target_date)
-            else:
-                # Try parsing string as date
-                parsed_date = pd.to_datetime(col_str, errors='coerce')
-                if pd.notna(parsed_date):
-                    target_date = parsed_date.strftime("%Y-%m-%d")
-                    date_columns_found.append(target_date)
-                else:
-                    # Not a date, keep original name (cleaned)
-                    target_date = re.sub(r'[^\w\s-]', '', col_str).strip()
-            
-            column_mapping[col_original] = target_date
-            
-        except Exception:
-            # If date parsing fails, use cleaned column name
-            target_date = re.sub(r'[^\w\s-]', '', col_str).strip()
-            column_mapping[col_original] = target_date
-    
-    st.info(f"📅 Date columns found in Excel: {date_columns_found}")
-    
-    # Apply column renaming
-    uploaded_plan_renamed = uploaded_plan.rename(columns=column_mapping)
-    
-    # Debug: Show what we have after renaming
-    st.info(f"🔄 Columns after renaming: {list(uploaded_plan_renamed.columns)}")
-    
-    # Clean the SKU column data
-    uploaded_plan_renamed["SKU"] = robust_string_clean(uploaded_plan_renamed["SKU"])
-    
-    # Process ALL columns that look like dates or are in our date_strings list
-    for col in uploaded_plan_renamed.columns:
-        if col == "SKU":
-            continue
-        
-        # Convert to numeric, handling any text or empty values
-        uploaded_plan_renamed[col] = pd.to_numeric(
-            uploaded_plan_renamed[col], errors="coerce"
-        ).fillna(0)
-    
-    # Debug: Show a sample of the data
-    st.success(f"✅ Data preview after processing:")
-    st.dataframe(uploaded_plan_renamed.head(), use_container_width=True)
-    
-    # Ensure all required date columns exist (from the app's date range)
-    for date_str in date_strings:
-        if date_str not in uploaded_plan_renamed.columns:
-            uploaded_plan_renamed[date_str] = 0
-            st.warning(f"⚠️ Date column '{date_str}' not found in Excel. Adding with zero values.")
-    
-    # Keep only SKU and date columns that are needed
-    keep_cols = ["SKU"] + date_strings
-    
-    # Check which columns exist before trying to keep them
-    existing_keep_cols = [col for col in keep_cols if col in uploaded_plan_renamed.columns]
-    final_plan = uploaded_plan_renamed[existing_keep_cols].copy()
-    
-    # Add missing date columns with zeros
-    for date_str in date_strings:
-        if date_str not in final_plan.columns:
-            final_plan[date_str] = 0
-    
-    # Reorder columns to match expected order
-    final_plan = final_plan[["SKU"] + date_strings]
-    
-    # Remove rows where SKU is empty
-    final_plan = final_plan[final_plan["SKU"].str.strip() != ""]
-    
-    # Final debug info
-    st.success(f"✅ Final data structure: {len(final_plan)} rows, {len(final_plan.columns)} columns")
-    st.success(f"📊 Final column order: {list(final_plan.columns)}")
-    
-    return final_plan
+def update_plan_df(mode):
+    """Update the appropriate plan dataframe"""
+    df_key = "manual_plan_df" if mode == "Define manually" else "uploaded_plan_df"
+    return df_key
 
 def main():
     st.set_page_config(layout="wide")
     st.title("SKU Production Planner & MRP Run")
     
-    # Add refresh button to manually clear cache and reload data
+    # Refresh button
     col1, col2, col3 = st.columns([1.5, 1, 3.5])
     with col1:
-        if st.button("🔄 Refresh Excel Files", type="secondary", help="Clear cache and reload updated Excel files"):
+        if st.button("🔄 Refresh Excel Files", type="secondary", key="refresh_excel_files_button"):
             st.cache_data.clear()
-            st.success("✅ Cache cleared! Data will be reloaded.")
+            st.success("✅ Cache cleared!")
             st.rerun()
-    
     with col2:
-        # Show last loaded timestamp
-        if "last_refresh_time" not in st.session_state:
-            st.session_state.last_refresh_time = date.today().strftime("%Y-%m-%d %H:%M:%S")
-        st.caption(f"Data loaded")
+        st.caption("Data loaded")
     
-    # Load SKU Data with file hash for automatic cache invalidation
-    sku_file_hash = get_file_hash(SKU_FILE_PATH)
-    raw_materials_df = load_data(sku_file_hash)
+    # Load data
+    sku_hash = get_file_hash(SKU_FILE_PATH)
+    raw_materials_df = load_data(sku_hash)
     sku_list = raw_materials_df["SKU"].dropna().unique().tolist()
-    st.success(f"✅ SKU & Material data loaded from: {SKU_FILE_PATH}")
+    st.success(f"✅ SKU data loaded from: {SKU_FILE_PATH}")
 
-    # Dates setup
+    # Date setup
     if "num_extra_dates" not in st.session_state:
         st.session_state.num_extra_dates = 0
-    num_extra_dates = st.number_input(
-        "How many extra days to plan?",
-        min_value=0, max_value=30,
-        value=st.session_state.num_extra_dates,
-        step=1
-    )
+    
+    num_extra_dates = st.number_input("How many extra days to plan?", 0, 30, st.session_state.num_extra_dates, 1)
     st.session_state.num_extra_dates = num_extra_dates
-    dates_list = [date.today()] + [date.today() + timedelta(days=i) for i in range(1, num_extra_dates + 1)]
+    dates_list = [date.today() + timedelta(days=i) for i in range(num_extra_dates + 1)]
     date_strings = [d.strftime("%Y-%m-%d") for d in dates_list]
 
-    # Choose Input Method
+    # Input method
     st.subheader("Production Plan Input Method")
-    plan_input_mode = st.radio(
-        "How would you like to provide the production plan?",
-        ["Define manually", "Upload from Excel"],
-        horizontal=True,
-        key="plan_input_mode_radio"
-    )
+    plan_mode = st.radio("How would you like to provide the production plan?",
+                         ["Define manually", "Upload from Excel"], horizontal=True)
 
-    # Initialize separate session state variables for each mode
-    if "manual_plan_df" not in st.session_state:
-        st.session_state.manual_plan_df = pd.DataFrame()
-    
-    if "uploaded_plan_df" not in st.session_state:
-        st.session_state.uploaded_plan_df = pd.DataFrame()
-    
-    # Track which mode was last used
-    if "current_mode" not in st.session_state:
-        st.session_state.current_mode = plan_input_mode
-    
-    # If mode changed, update the tracking
-    if st.session_state.current_mode != plan_input_mode:
-        st.session_state.current_mode = plan_input_mode
+    # Initialize session state
+    for key in ["manual_plan_df", "uploaded_plan_df", "matrix_df"]:
+        if key not in st.session_state:
+            st.session_state[key] = pd.DataFrame()
 
-    # Manual Mode
-    if plan_input_mode == "Define manually":
-        st.info("📝 **Manual Definition Mode** - Create your production plan from scratch")
+    # Manual mode
+    if plan_mode == "Define manually":
+        st.info("📝 **Manual Mode** - Create production plan from scratch")
         
         if st.session_state.manual_plan_df.empty:
-            rows = st.number_input("How many SKU rows?", min_value=1, max_value=50, value=5, step=1, key="manual_rows")
+            rows = st.number_input("How many SKU rows?", 1, 50, 5, 1)
             if st.button("Initialize Manual Plan", type="secondary"):
-                st.session_state.manual_plan_df = pd.DataFrame({"SKU": [""] * rows})
-                for d in date_strings:
-                    st.session_state.manual_plan_df[d] = 0
+                st.session_state.manual_plan_df = pd.DataFrame({"SKU": [""] * rows, **{d: 0 for d in date_strings}})
                 st.rerun()
         else:
-            cols_to_keep = ["SKU"] + date_strings
-            st.session_state.manual_plan_df = st.session_state.manual_plan_df.reindex(columns=cols_to_keep, fill_value=0)
-        
-        # Set the active dataframe to manual
-        if not st.session_state.manual_plan_df.empty:
+            st.session_state.manual_plan_df = st.session_state.manual_plan_df.reindex(
+                columns=["SKU"] + date_strings, fill_value=0)
             st.session_state.matrix_df = st.session_state.manual_plan_df.copy()
 
-    # Upload Mode - FIXED VERSION WITH CACHE INVALIDATION
-    elif plan_input_mode == "Upload from Excel":
-        st.info("📁 **Excel Upload Mode** - Load production plan from Excel file")
+    # Excel mode
+    else:
+        st.info("📁 **Excel Mode** - Load production plan from Excel")
         
-        # Button to trigger Excel upload/reload
         col1, col2 = st.columns([1, 3])
         with col1:
-            load_excel = st.button("📥 Load from Excel", type="secondary")
+            load_excel = st.button("📥 Load from Excel", type="secondary", key="load_excel_button")
         with col2:
             if not st.session_state.uploaded_plan_df.empty:
                 st.success(f"✅ Excel data loaded ({len(st.session_state.uploaded_plan_df)} rows)")
         
-        # Load Excel data when button is clicked or if not loaded yet
-        if load_excel or st.session_state.uploaded_plan_df.empty:
+        if load_excel:
             try:
-                # Get file hash for cache invalidation
-                plan_file_hash = get_file_hash(PLAN_FILE_PATH)
+                # Clear cache to force reload of the Excel file
+                st.cache_data.clear()
                 
-                # Load using cached function with hash
-                processed_plan = load_production_plan(plan_file_hash, date_strings)
+                plan_hash = get_file_hash(PLAN_FILE_PATH)
+                processed = load_production_plan(plan_hash, date_strings)
                 
-                if processed_plan is not None:
-                    st.session_state.uploaded_plan_df = processed_plan
-                    st.success(f"✅ Production plan loaded successfully from: {PLAN_FILE_PATH}")
-                    st.success(f"📊 Loaded {len(st.session_state.uploaded_plan_df)} SKU rows with data")
-                    
-                    # Show preview of loaded data
-                    with st.expander("Preview of loaded data"):
-                        st.dataframe(st.session_state.uploaded_plan_df.head(), use_container_width=True)
-                
+                if processed is not None:
+                    st.session_state.uploaded_plan_df = processed
+                    st.session_state.matrix_df = processed.copy()
+                    st.success(f"✅ Plan loaded: {len(processed)} SKUs")
+                    with st.expander("Preview"):
+                        st.dataframe(processed.head(), use_container_width=True)
+                    st.rerun()
             except FileNotFoundError:
-                st.error(f"❌ No plan file found at {PLAN_FILE_PATH}")
-                st.warning("Please ensure the Excel file exists at the specified path.")
+                st.error(f"❌ File not found: {PLAN_FILE_PATH}")
             except Exception as e:
-                st.error(f"❌ Error loading plan: {e}")
+                st.error(f"❌ Error: {e}")
         
-        # Set the active dataframe to uploaded
+        # Set matrix_df if uploaded plan exists
         if not st.session_state.uploaded_plan_df.empty:
             st.session_state.matrix_df = st.session_state.uploaded_plan_df.copy()
 
-    # Editable Grid
-    st.subheader(f"Production Plan (Editable) - {plan_input_mode}")
-    if "matrix_df" not in st.session_state or st.session_state.matrix_df.empty:
-        if plan_input_mode == "Define manually":
-            st.warning("📝 Click 'Initialize Manual Plan' above to start creating your production plan manually.")
-        else:
-            st.warning("📁 Click 'Load from Excel' above to load your production plan from the Excel file.")
+    # Editable grid
+    st.subheader(f"Production Plan (Editable) - {plan_mode}")
+    
+    if st.session_state.matrix_df.empty:
+        msg = "📝 Click 'Initialize Manual Plan'" if plan_mode == "Define manually" else "📁 Click 'Load from Excel'"
+        st.warning(f"{msg} to start.")
     else:
-        # Ensure matrix_df matches current date_strings
-        for d in date_strings:
-            if d not in st.session_state.matrix_df.columns:
-                st.session_state.matrix_df[d] = 0
-        cols_to_keep = ["SKU"] + date_strings
-        st.session_state.matrix_df = st.session_state.matrix_df.reindex(columns=cols_to_keep, fill_value=0)
-
-        # Ensure all date columns are numeric
+        # Ensure columns match
+        st.session_state.matrix_df = st.session_state.matrix_df.reindex(
+            columns=["SKU"] + date_strings, fill_value=0)
+        
         for d in date_strings:
             st.session_state.matrix_df[d] = pd.to_numeric(
-                st.session_state.matrix_df[d], errors="coerce"
-            ).fillna(0).astype(int)
+                st.session_state.matrix_df[d], errors="coerce").fillna(0).astype(int)
 
-        # Add/Remove rows functionality (available for both modes)
+        # Row operations
+        df_key = update_plan_df(plan_mode)
+        current_df = st.session_state[df_key]
+        
         col1, col2, col3, col4 = st.columns([1, 1, 1, 3])
         
         with col1:
             if st.button("➕ Add Row"):
-                new_row = pd.DataFrame({"SKU": [""]})
-                for d in date_strings:
-                    new_row[d] = 0
-                
-                if plan_input_mode == "Define manually":
-                    st.session_state.manual_plan_df = pd.concat([st.session_state.manual_plan_df, new_row], ignore_index=True)
-                    st.session_state.matrix_df = st.session_state.manual_plan_df.copy()
-                else:
-                    st.session_state.uploaded_plan_df = pd.concat([st.session_state.uploaded_plan_df, new_row], ignore_index=True)
-                    st.session_state.matrix_df = st.session_state.uploaded_plan_df.copy()
+                new_row = pd.DataFrame({"SKU": [""], **{d: 0 for d in date_strings}})
+                st.session_state[df_key] = pd.concat([current_df, new_row], ignore_index=True)
+                st.session_state.matrix_df = st.session_state[df_key].copy()
                 st.rerun()
         
         with col2:
-            current_df = st.session_state.manual_plan_df if plan_input_mode == "Define manually" else st.session_state.uploaded_plan_df
             if st.button("➖ Remove Last Row") and len(current_df) > 1:
-                if plan_input_mode == "Define manually":
-                    st.session_state.manual_plan_df = st.session_state.manual_plan_df.iloc[:-1]
-                    st.session_state.matrix_df = st.session_state.manual_plan_df.copy()
-                else:
-                    st.session_state.uploaded_plan_df = st.session_state.uploaded_plan_df.iloc[:-1]
-                    st.session_state.matrix_df = st.session_state.uploaded_plan_df.copy()
+                st.session_state[df_key] = current_df.iloc[:-1]
+                st.session_state.matrix_df = st.session_state[df_key].copy()
                 st.rerun()
         
         with col3:
-            if plan_input_mode == "Upload from Excel":
-                # Row deletion selector for Excel mode
-                if len(st.session_state.uploaded_plan_df) > 1:
-                    row_to_delete = st.selectbox(
-                        "Delete row:",
-                        options=list(range(len(st.session_state.uploaded_plan_df))),
-                        format_func=lambda x: f"Row {x+1}: {st.session_state.uploaded_plan_df.iloc[x]['SKU'] if st.session_state.uploaded_plan_df.iloc[x]['SKU'] else 'Empty'}",
-                        key="delete_row_selector"
-                    )
-                    if st.button("🗑️ Delete Selected"):
-                        st.session_state.uploaded_plan_df = st.session_state.uploaded_plan_df.drop(index=row_to_delete).reset_index(drop=True)
-                        st.session_state.matrix_df = st.session_state.uploaded_plan_df.copy()
-                        st.success(f"Deleted row {row_to_delete + 1}")
-                        st.rerun()
-            else:
-                # Row deletion selector for Manual mode
-                if len(st.session_state.manual_plan_df) > 1:
-                    row_to_delete = st.selectbox(
-                        "Delete row:",
-                        options=list(range(len(st.session_state.manual_plan_df))),
-                        format_func=lambda x: f"Row {x+1}: {st.session_state.manual_plan_df.iloc[x]['SKU'] if st.session_state.manual_plan_df.iloc[x]['SKU'] else 'Empty'}",
-                        key="delete_row_selector_manual"
-                    )
-                    if st.button("🗑️ Delete Selected"):
-                        st.session_state.manual_plan_df = st.session_state.manual_plan_df.drop(index=row_to_delete).reset_index(drop=True)
-                        st.session_state.matrix_df = st.session_state.manual_plan_df.copy()
-                        st.success(f"Deleted row {row_to_delete + 1}")
-                        st.rerun()
+            if len(current_df) > 1:
+                row_del = st.selectbox("Delete row:", list(range(len(current_df))),
+                    format_func=lambda x: f"Row {x+1}: {current_df.iloc[x]['SKU'] or 'Empty'}")
+                if st.button("🗑️ Delete Selected"):
+                    st.session_state[df_key] = current_df.drop(index=row_del).reset_index(drop=True)
+                    st.session_state.matrix_df = st.session_state[df_key].copy()
+                    st.rerun()
         
-        # Info message for Excel mode
-        if plan_input_mode == "Upload from Excel":
-            st.info("💡 **Excel Mode**: You can add/remove rows and edit values. Click '🔄 Refresh Excel Files' at the top to reload if you've updated the source file.")
+        if plan_mode == "Upload from Excel":
+            st.info("💡 Click '🔄 Refresh Excel Files' to reload updated source file.")
 
-        # Dynamic Header Display
+        # Grid header
         header_cols = st.columns([3] + [1] * len(date_strings))
         header_cols[0].markdown("**SKU**")
         for i, d in enumerate(date_strings):
             header_cols[i + 1].markdown(f"**{d}**")
 
-        num_rows = len(st.session_state.matrix_df)
+        # Grid rows
         sku_options = [""] + sku_list
-        
-        for row in range(num_rows):
+        for row in range(len(st.session_state.matrix_df)):
             row_cols = st.columns([3] + [1] * len(date_strings))
             
-            # Get current SKU and find its index in options
             current_sku = str(st.session_state.matrix_df.iloc[row]["SKU"]).strip()
+            sku_idx = sku_options.index(current_sku) if current_sku in sku_options else 0
             
-            # Find index in sku_options, default to 0 (empty) if not found
-            try:
-                sku_index = sku_options.index(current_sku) if current_sku in sku_options else 0
-            except ValueError:
-                sku_index = 0
+            selected_sku = row_cols[0].selectbox("SKU", sku_options, sku_idx, 
+                                                 key=f"sku_{row}", label_visibility="collapsed")
+            st.session_state[df_key].at[row, "SKU"] = selected_sku
             
-            # SKU Dropdown
-            selected_sku = row_cols[0].selectbox(
-                label="SKU", 
-                options=sku_options, 
-                index=sku_index, 
-                key=f"sku_{row}",
-                label_visibility="collapsed"
-            )
-            # Save changes back to the appropriate session state
-            if plan_input_mode == "Define manually":
-                st.session_state.manual_plan_df.at[row, "SKU"] = selected_sku
-            else:
-                st.session_state.uploaded_plan_df.at[row, "SKU"] = selected_sku
-            
-            # Quantity Inputs
             for i, d in enumerate(date_strings):
-                current_qty = int(st.session_state.matrix_df.iloc[row][d])
-                qty_val = row_cols[i + 1].number_input(
-                    label=d,
-                    min_value=0, step=1,
-                    value=current_qty,
-                    key=f"qty_{row}_{d}",
-                    format="%d",
-                    label_visibility="collapsed"
-                )
-                # Save changes back to the appropriate session state
-                if plan_input_mode == "Define manually":
-                    st.session_state.manual_plan_df.at[row, d] = qty_val
-                else:
-                    st.session_state.uploaded_plan_df.at[row, d] = qty_val
+                qty = int(st.session_state.matrix_df.iloc[row][d])
+                qty_val = row_cols[i + 1].number_input(d, 0, step=1, value=qty,
+                    key=f"qty_{row}_{d}", format="%d", label_visibility="collapsed")
+                st.session_state[df_key].at[row, d] = qty_val
 
-        # Download Production Plan
+        # Download
         st.markdown("---")
-        col_download1, col_download2, col_download3 = st.columns([1, 1, 2])
+        col1, col2, col3 = st.columns([1, 1, 2])
         
-        with col_download1:
-            # Prepare production plan for download
+        with col1:
             download_df = st.session_state.matrix_df.copy()
-            buffer_plan = io.BytesIO()
-            download_df.to_excel(buffer_plan, index=False, sheet_name="ProductionPlan")
-            buffer_plan.seek(0)
-            
-            st.download_button(
-                label="📥 Download Production Plan",
-                data=buffer_plan,
-                file_name=f"ProductionPlan_{date.today().strftime('%Y%m%d')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary"
-            )
+            buffer = io.BytesIO()
+            download_df.to_excel(buffer, index=False, sheet_name="ProductionPlan")
+            buffer.seek(0)
+            st.download_button("📥 Download Production Plan", buffer,
+                f"ProductionPlan_{date.today().strftime('%Y%m%d')}.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
         
-        with col_download2:
-            st.metric("Total SKUs in Plan", len(download_df[download_df['SKU'] != '']))
+        with col2:
+            st.metric("Total SKUs", len(download_df[download_df['SKU'] != '']))
         
-        with col_download3:
-            # Calculate total production quantity across all dates
-            total_qty = 0
-            for d in date_strings:
-                if d in download_df.columns:
-                    total_qty += download_df[d].sum()
+        with col3:
+            total_qty = sum(download_df[d].sum() for d in date_strings if d in download_df.columns)
             st.metric("Total Production Quantity", f"{int(total_qty):,}")
 
     # Run MRP
     if st.button("Run MRP", type="primary"):
-        if "matrix_df" not in st.session_state or st.session_state.matrix_df.empty:
+        if st.session_state.matrix_df.empty:
             st.warning("Please define or upload a production plan first.")
         else:
             with st.spinner("Performing MRP..."):
-                mrp_result = perform_mrp_run(st.session_state.matrix_df, raw_materials_df, date_strings)
-            st.session_state.mrp_result = mrp_result
+                st.session_state.mrp_result = perform_mrp_run(
+                    st.session_state.matrix_df, raw_materials_df, date_strings)
             st.success("MRP run completed!")
 
-    # Show Results
+    # Show results
     if "mrp_result" in st.session_state and not st.session_state.mrp_result.empty:
         st.subheader("MRP Results: Remaining Raw Material Stock")
 
-        # Search functionality
         col1, col2, col3 = st.columns([2, 1, 1])
         
         with col1:
-            search_term = st.text_input(
-                "🔍 Search for Material/Part Number:",
-                placeholder="Enter material name or part number...",
-                help="Search in Material name, Material Description, or Supplier Name"
-            )
+            search = st.text_input("🔍 Search for Material/Part Number:",
+                placeholder="Enter material name or part number...")
         
         with col2:
-            sort_option = st.selectbox(
-                "Sort by:",
-                ["Negative Stock First", "Material Name (A-Z)", "Material Name (Z-A)", "Total Stock (Low to High)", "Total Stock (High to Low)"],
-                help="Choose how to sort the results"
-            )
+            sort_opt = st.selectbox("Sort by:",
+                ["Negative Stock First", "Material Name (A-Z)", "Material Name (Z-A)", 
+                 "Total Stock (Low to High)", "Total Stock (High to Low)"])
         
         with col3:
-            show_negative_only = st.checkbox(
-                "Show Only Negative Stock",
-                value=False,
-                help="Display only materials with negative stock in any date"
-            )
+            neg_only = st.checkbox("Show Only Negative Stock", False)
         
-        # Create a copy of results for filtering/sorting
         display_df = st.session_state.mrp_result.copy()
-        
-        # Add Material name as a column (it's currently the index)
         display_df.insert(0, 'Material', display_df.index)
         
-        # Apply search filter
-        if search_term:
-            search_term_upper = search_term.upper()
-            mask = (
-                display_df['Material'].str.upper().str.contains(search_term_upper, na=False) |
-                display_df['Material Description'].str.upper().str.contains(search_term_upper, na=False) |
-                display_df['Supplier Name'].str.upper().str.contains(search_term_upper, na=False)
-            )
+        # Search filter
+        if search:
+            search_upper = search.upper()
+            mask = (display_df['Material'].str.upper().str.contains(search_upper, na=False) |
+                   display_df['Material Description'].str.upper().str.contains(search_upper, na=False) |
+                   display_df['Supplier Name'].str.upper().str.contains(search_upper, na=False))
             display_df = display_df[mask]
             
             if len(display_df) == 0:
-                st.warning(f"⚠️ No results found for '{search_term}'")
+                st.warning(f"⚠️ No results found for '{search}'")
             else:
-                st.success(f"✅ Found {len(display_df)} material(s) matching '{search_term}'")
+                st.success(f"✅ Found {len(display_df)} material(s)")
         
-        # Filter for negative stock only
-        if show_negative_only:
-            # Get date columns (exclude the info columns)
-            date_cols = [col for col in display_df.columns if col not in ['Material', 'Material Description', 'Supplier Name', 'MRP', 'Total Stock']]
-            
-            # Check if any date column has negative values
-            has_negative = display_df[date_cols].lt(0).any(axis=1)
-            display_df = display_df[has_negative]
+        # Negative filter
+        if neg_only:
+            date_cols = [c for c in display_df.columns 
+                        if c not in ['Material', 'Material Description', 'Supplier Name', 'MRP', 'Total Stock']]
+            display_df = display_df[display_df[date_cols].lt(0).any(axis=1)]
             
             if len(display_df) == 0:
-                st.success("✅ Great! No materials have negative stock.")
+                st.success("✅ No materials have negative stock.")
             else:
-                st.warning(f"⚠️ {len(display_df)} material(s) have negative stock on one or more dates")
+                st.warning(f"⚠️ {len(display_df)} material(s) with negative stock")
         
-        # Apply sorting
-        if sort_option == "Negative Stock First":
-            # Get date columns
-            date_cols = [col for col in display_df.columns if col not in ['Material', 'Material Description', 'Supplier Name', 'MRP', 'Total Stock']]
-            
-            # Create a column for minimum stock across all dates
-            display_df['_min_stock'] = display_df[date_cols].min(axis=1)
-            
-            # Sort by minimum stock (lowest first, which will show negatives at top)
-            display_df = display_df.sort_values('_min_stock', ascending=True)
-            
-            # Drop the temporary column
-            display_df = display_df.drop(columns=['_min_stock'])
-            
-        elif sort_option == "Material Name (A-Z)":
-            display_df = display_df.sort_values('Material', ascending=True)
-            
-        elif sort_option == "Material Name (Z-A)":
-            display_df = display_df.sort_values('Material', ascending=False)
-            
-        elif sort_option == "Total Stock (Low to High)":
-            display_df = display_df.sort_values('Total Stock', ascending=True)
-            
-        elif sort_option == "Total Stock (High to Low)":
-            display_df = display_df.sort_values('Total Stock', ascending=False)
+        # Sorting
+        date_cols = [c for c in display_df.columns 
+                    if c not in ['Material', 'Material Description', 'Supplier Name', 'MRP', 'Total Stock']]
         
-        # Set Material back as index for display
+        if sort_opt == "Negative Stock First" and date_cols:
+            display_df['_min'] = display_df[date_cols].min(axis=1)
+            display_df = display_df.sort_values('_min').drop(columns=['_min'])
+        elif "Material Name" in sort_opt:
+            display_df = display_df.sort_values('Material', ascending="A-Z" in sort_opt)
+        elif "Total Stock" in sort_opt:
+            display_df = display_df.sort_values('Total Stock', ascending="Low" in sort_opt)
+        
         display_df = display_df.set_index('Material')
         
-        # Show summary statistics
-        date_cols = [col for col in display_df.columns if col not in ['Material Description', 'Supplier Name', 'MRP', 'Total Stock']]
-        
-        if len(date_cols) > 0:
-            negative_materials = display_df[date_cols].lt(0).any(axis=1).sum()
-            total_materials = len(display_df)
+        # Stats
+        if date_cols:
+            neg_count = display_df[date_cols].lt(0).any(axis=1).sum()
+            total_count = len(display_df)
             
-            col_stat1, col_stat2, col_stat3 = st.columns(3)
-            with col_stat1:
-                st.metric("Total Materials", total_materials)
-            with col_stat2:
-                st.metric("Materials with Negative Stock", negative_materials)
-            with col_stat3:
-                if negative_materials > 0:
-                    st.metric("Materials OK", total_materials - negative_materials)
-                else:
-                    st.metric("✅ All Materials OK", total_materials)
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Total Materials", total_count)
+            c2.metric("Materials with Negative Stock", neg_count)
+            c3.metric("✅ All Materials OK" if neg_count == 0 else "Materials OK", 
+                     total_count if neg_count == 0 else total_count - neg_count)
         
-        # Display the filtered/sorted results
-        def highlight_negatives(val):
+        # Display with highlighting
+        def highlight(val):
             try:
-                if float(val) < 0:
-                    return "background-color: #ffcccc"
-                # Highlight if stock is exactly zero (optional visual cue)
-                if float(val) == 0:
-                    return "background-color: #ffffcc" 
-            except Exception:
-                pass
+                v = float(val)
+                if v < 0: return "background-color: #ffcccc"
+                if v == 0: return "background-color: #ffffcc"
+            except: pass
             return ""
 
-        st.dataframe(
-            display_df.style.applymap(highlight_negatives),
-            use_container_width=True,
-            height=600
-        )
+        st.dataframe(display_df.style.applymap(highlight), use_container_width=True, height=600)
 
+        # Download results
         buffer = io.BytesIO()
         display_df.to_excel(buffer, index=True)
         buffer.seek(0)
-        st.download_button(
-            label="📥 Download MRP Results as Excel",
-            data=buffer,
-            file_name=f"MRP_Results_{date.today().strftime('%Y%m%d')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+        st.download_button("📥 Download MRP Results", buffer,
+            f"MRP_Results_{date.today().strftime('%Y%m%d')}.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-    # Clear Data - Updated to handle both modes
+    # Clear data
     st.markdown("---")
     st.subheader("Data Management")
-    col1, col2, col3 = st.columns(3)
+    c1, c2, c3 = st.columns(3)
     
-    with col1:
+    with c1:
         if st.button("🗑️ Clear Manual Plan", type="secondary"):
             st.session_state.manual_plan_df = pd.DataFrame()
-            if plan_input_mode == "Define manually":
+            if plan_mode == "Define manually":
                 st.session_state.matrix_df = pd.DataFrame()
-            st.success("Manual plan cleared.")
             st.rerun()
     
-    with col2:
+    with c2:
         if st.button("🗑️ Clear Excel Plan", type="secondary"):
             st.session_state.uploaded_plan_df = pd.DataFrame()
-            if plan_input_mode == "Upload from Excel":
-                st.session_state.matrix_df = pd.DataFrame()
+            st.session_state.matrix_df = pd.DataFrame()
+            st.cache_data.clear()  # Clear cache when clearing Excel plan
             st.success("Excel plan cleared.")
             st.rerun()
     
-    with col3:
+    with c3:
         if st.button("🗑️ Clear All Data", type="secondary"):
-            st.session_state.manual_plan_df = pd.DataFrame()
-            st.session_state.uploaded_plan_df = pd.DataFrame()
-            st.session_state.matrix_df = pd.DataFrame()
-            if "mrp_result" in st.session_state:
-                del st.session_state.mrp_result
+            for key in ["manual_plan_df", "uploaded_plan_df", "matrix_df", "mrp_result"]:
+                if key in st.session_state:
+                    if key == "mrp_result":
+                        del st.session_state[key]
+                    else:
+                        st.session_state[key] = pd.DataFrame()
             st.session_state.num_extra_dates = 0
-            st.success("All data cleared.")
             st.rerun()
 
 if __name__ == "__main__":
