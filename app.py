@@ -3,12 +3,24 @@ import pandas as pd
 from datetime import date, timedelta
 import io
 import re
+import hashlib
+import os
 
 # Fixed file paths
 SKU_FILE_PATH = "SKU Simulation.xlsx"  
-df = pd.read_excel(SKU_FILE_PATH)
-PLAN_FILE_PATH = "ProductionPlan.xlsx"  
-df = pd.read_excel(PLAN_FILE_PATH)
+PLAN_FILE_PATH = "ProductionPlan.xlsx"
+
+# Helper function to generate file hash for cache invalidation
+def get_file_hash(filepath):
+    """Generate hash of file to detect changes"""
+    try:
+        if os.path.exists(filepath):
+            with open(filepath, 'rb') as f:
+                return hashlib.md5(f.read()).hexdigest()
+        return None
+    except Exception as e:
+        st.warning(f"Could not generate hash for {filepath}: {e}")
+        return None
 
 # Helper function for maximum string cleanup
 def robust_string_clean(series):
@@ -21,8 +33,8 @@ def robust_string_clean(series):
         .str.replace('\t', '')   # Remove tab character
     )
 
-@st.cache_data
-def load_data():
+@st.cache_data(ttl=600)  # 10 minute TTL as backup
+def load_data(file_hash):
     """Loads SKU master data (SKU, Material, Quantity, Total Stock, Material Description, Supplier Name, MRP)."""
     try:
         df = pd.read_excel(SKU_FILE_PATH, sheet_name="Sheet1")
@@ -110,6 +122,17 @@ def load_data():
     except Exception as e:
         st.error(f"Error loading SKU data: {e}")
         st.stop()
+
+@st.cache_data(ttl=600)  # 10 minute TTL as backup
+def load_production_plan(file_hash, date_strings):
+    """Load production plan from Excel with cache invalidation"""
+    try:
+        uploaded_plan = pd.read_excel(PLAN_FILE_PATH, sheet_name="Sheet1")
+        processed_plan = process_uploaded_plan(uploaded_plan, date_strings)
+        return processed_plan
+    except Exception as e:
+        st.error(f"Error loading production plan: {e}")
+        return None
 
 def perform_mrp_run(production_plan_df, raw_materials_df, dates_list):
     """Performs MRP run to calculate material consumption and remaining stock."""
@@ -310,11 +333,26 @@ def process_uploaded_plan(uploaded_plan, date_strings):
 def main():
     st.set_page_config(layout="wide")
     st.title("SKU Production Planner & MRP Run")
-
-    # Load SKU Data
-    raw_materials_df = load_data()
+    
+    # Add refresh button to manually clear cache and reload data
+    col1, col2, col3 = st.columns([1.5, 1, 3.5])
+    with col1:
+        if st.button("🔄 Refresh Excel Files", type="secondary", help="Clear cache and reload updated Excel files"):
+            st.cache_data.clear()
+            st.success("✅ Cache cleared! Data will be reloaded.")
+            st.rerun()
+    
+    with col2:
+        # Show last loaded timestamp
+        if "last_refresh_time" not in st.session_state:
+            st.session_state.last_refresh_time = date.today().strftime("%Y-%m-%d %H:%M:%S")
+        st.caption(f"Data loaded")
+    
+    # Load SKU Data with file hash for automatic cache invalidation
+    sku_file_hash = get_file_hash(SKU_FILE_PATH)
+    raw_materials_df = load_data(sku_file_hash)
     sku_list = raw_materials_df["SKU"].dropna().unique().tolist()
-    st.success(f"SKU & Material data loaded from: {SKU_FILE_PATH}")
+    st.success(f"✅ SKU & Material data loaded from: {SKU_FILE_PATH}")
 
     # Dates setup
     if "num_extra_dates" not in st.session_state:
@@ -372,7 +410,7 @@ def main():
         if not st.session_state.manual_plan_df.empty:
             st.session_state.matrix_df = st.session_state.manual_plan_df.copy()
 
-    # Upload Mode - FIXED VERSION
+    # Upload Mode - FIXED VERSION WITH CACHE INVALIDATION
     elif plan_input_mode == "Upload from Excel":
         st.info("📁 **Excel Upload Mode** - Load production plan from Excel file")
         
@@ -387,10 +425,11 @@ def main():
         # Load Excel data when button is clicked or if not loaded yet
         if load_excel or st.session_state.uploaded_plan_df.empty:
             try:
-                uploaded_plan = pd.read_excel(PLAN_FILE_PATH, sheet_name="Sheet1")
+                # Get file hash for cache invalidation
+                plan_file_hash = get_file_hash(PLAN_FILE_PATH)
                 
-                # Use improved processing function
-                processed_plan = process_uploaded_plan(uploaded_plan, date_strings)
+                # Load using cached function with hash
+                processed_plan = load_production_plan(plan_file_hash, date_strings)
                 
                 if processed_plan is not None:
                     st.session_state.uploaded_plan_df = processed_plan
@@ -492,7 +531,7 @@ def main():
         
         # Info message for Excel mode
         if plan_input_mode == "Upload from Excel":
-            st.info("💡 **Excel Mode**: You can add/remove rows and edit values. Use 'Load from Excel' to reload original data if needed.")
+            st.info("💡 **Excel Mode**: You can add/remove rows and edit values. Click '🔄 Refresh Excel Files' at the top to reload if you've updated the source file.")
 
         # Dynamic Header Display
         header_cols = st.columns([3] + [1] * len(date_strings))
@@ -725,6 +764,8 @@ def main():
         )
 
     # Clear Data - Updated to handle both modes
+    st.markdown("---")
+    st.subheader("Data Management")
     col1, col2, col3 = st.columns(3)
     
     with col1:
