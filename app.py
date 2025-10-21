@@ -223,7 +223,7 @@ def main():
     # Refresh button
     col1, col2, col3 = st.columns([1.5, 1, 3.5])
     with col1:
-        if st.button("🔄 Refresh Excel Files", type="secondary"):
+        if st.button("🔄 Refresh Excel Files", type="secondary", key="refresh_excel_files_button"):
             st.cache_data.clear()
             st.success("✅ Cache cleared!")
             st.rerun()
