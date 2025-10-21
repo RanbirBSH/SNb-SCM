@@ -137,7 +137,8 @@ def load_production_plan(file_hash, date_strings):
 def perform_mrp_run(production_plan_df, raw_materials_df, dates_list):
     """Performs MRP run to calculate material consumption and remaining stock."""
     material_list = raw_materials_df["Material"].unique().tolist()
-    material_stock = raw_materials_df.groupby("Material")["Total Stock"].sum().to_dict()
+    # Use .first() instead of .sum() since Total Stock is the same for a material regardless of SKUs
+    material_stock = raw_materials_df.groupby("Material")["Total Stock"].first().to_dict()
     
     # Create dictionaries for additional material information (keep MRP as string)
     material_description_dict = raw_materials_df.groupby("Material")["Material Description"].first().to_dict()
